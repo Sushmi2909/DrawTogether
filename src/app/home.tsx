@@ -10,7 +10,7 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
-type DrawingItem = { id: string; title: string; createdAt: string; updatedAt: string; thumbnail?: string | null; room?: string };
+type DrawingItem = { id: string; title: string; createdAt: string; updatedAt: string; thumbnail?: string | null; room?: string; starred?: boolean };
 
 export default function HomeScreen() {
   const [drawings, setDrawings] = useState<DrawingItem[]>([]);
@@ -120,6 +120,13 @@ export default function HomeScreen() {
           {item.room ? <Text style={styles.cardRoom}>#{item.room}</Text> : null}
         </View>
       </View>
+      <Pressable onPress={async () => {
+        const token = await getToken();
+        if (!token) return;
+        try { await api.saveDrawing(token, { starred: !item.starred }, item.id); item.starred = !item.starred; setDrawings((prev) => prev.map(d => d.id === item.id ? { ...d, starred: !d.starred } : d)); } catch {}
+      }} style={styles.starBtn}>
+        <Text style={[styles.starIcon, item.starred && styles.starActive]}>{item.starred ? '★' : '☆'}</Text>
+      </Pressable>
       <View style={styles.cardArrow}>
         <Text style={styles.arrowText}>›</Text>
       </View>
@@ -155,29 +162,29 @@ export default function HomeScreen() {
         </Pressable>
       </View>
 
-      <Animated.View style={[styles.heroCard, { opacity: fadeAnim, transform: [{ translateY: slideAnim }] }]}>
-        <View style={styles.heroContent}>
-          <Text style={styles.heroTitle}>DrawTogether</Text>
-          <Text style={styles.heroSub}>Create, share, and draw together in real-time</Text>
-          <View style={styles.heroActions}>
-            <Pressable style={styles.heroBtn} onPress={() => router.push('/canvas')}>
-              <Text style={styles.heroBtnIcon}>✏️</Text>
-              <Text style={styles.heroBtnText}>Solo</Text>
-            </Pressable>
-            <Pressable style={[styles.heroBtn, styles.heroBtnSecondary]} onPress={() => { setRoomName(''); setCreatedCode(null); setShowCreate(true); }}>
-              <Text style={styles.heroBtnIcon}>🏠</Text>
-              <Text style={styles.heroBtnText}>Create Room</Text>
-            </Pressable>
-            <Pressable style={[styles.heroBtn, styles.heroBtnOutline]} onPress={() => { setJoinCode(''); setShowJoin(true); }}>
-              <Text style={styles.heroBtnIcon}>🚪</Text>
-              <Text style={styles.heroBtnTextSecondary}>Join</Text>
-            </Pressable>
-          </View>
-        </View>
-        <View style={styles.heroGraphic}>
-          <Text style={styles.heroEmoji}>🎨</Text>
-        </View>
-      </Animated.View>
+      <View style={styles.cardsRow}>
+        <Animated.View style={[styles.cardSection, styles.cardSolo, { opacity: fadeAnim, transform: [{ translateY: slideAnim }] }]}>
+          <Pressable onPress={() => router.push('/canvas')} style={styles.cardSectionInner}>
+            <Text style={styles.cardSectionIcon}>✏️</Text>
+            <Text style={styles.cardSectionTitle}>Solo</Text>
+            <Text style={styles.cardSectionSub}>Draw on your own</Text>
+          </Pressable>
+        </Animated.View>
+        <Animated.View style={[styles.cardSection, styles.cardCreate, { opacity: fadeAnim, transform: [{ translateY: slideAnim }] }]}>
+          <Pressable onPress={() => { setRoomName(''); setCreatedCode(null); setShowCreate(true); }} style={styles.cardSectionInner}>
+            <Text style={styles.cardSectionIcon}>🏠</Text>
+            <Text style={styles.cardSectionTitle}>Create</Text>
+            <Text style={styles.cardSectionSub}>Create a room</Text>
+          </Pressable>
+        </Animated.View>
+        <Animated.View style={[styles.cardSection, styles.cardJoin, { opacity: fadeAnim, transform: [{ translateY: slideAnim }] }]}>
+          <Pressable onPress={() => { setJoinCode(''); setShowJoin(true); }} style={styles.cardSectionInner}>
+            <Text style={styles.cardSectionIcon}>🚪</Text>
+            <Text style={styles.cardSectionTitle}>Join</Text>
+            <Text style={styles.cardSectionSub}>Enter room code</Text>
+          </Pressable>
+        </Animated.View>
+      </View>
 
       <View style={styles.sectionHeader}>
         <Text style={styles.sectionTitle}>Gallery</Text>
@@ -295,27 +302,20 @@ const styles = StyleSheet.create({
   logoutBtn: { paddingHorizontal: 14, paddingVertical: 7, borderRadius: Radius.sm, backgroundColor: Palette.offWhite },
   logoutText: { fontWeight: '600', color: Palette.error, fontSize: 13 },
 
-  heroCard: {
-    flexDirection: 'row', marginHorizontal: 20, marginTop: 16, marginBottom: 8,
-    backgroundColor: Palette.purple, borderRadius: Radius.xl, overflow: 'hidden',
+  cardsRow: {
+    flexDirection: 'row', marginHorizontal: 16, marginTop: 16, marginBottom: 8, gap: 10,
+  },
+  cardSection: {
+    flex: 1, borderRadius: Radius.xl, overflow: 'hidden',
     ...Shadow.md,
   },
-  heroContent: { flex: 1, padding: 20 },
-  heroTitle: { fontSize: 22, fontWeight: '800', color: '#fff', letterSpacing: -0.5 },
-  heroSub: { fontSize: 12, color: 'rgba(255,255,255,0.7)', marginTop: 4 },
-  heroActions: { flexDirection: 'row', gap: 8, marginTop: 14 },
-  heroBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: Radius.full,
-    paddingHorizontal: 14, paddingVertical: 7,
-  },
-  heroBtnSecondary: { backgroundColor: Palette.teal },
-  heroBtnOutline: { backgroundColor: 'transparent', borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.4)' },
-  heroBtnIcon: { fontSize: 12 },
-  heroBtnText: { fontSize: 12, fontWeight: '700', color: '#fff' },
-  heroBtnTextSecondary: { fontSize: 12, fontWeight: '700', color: 'rgba(255,255,255,0.8)' },
-  heroGraphic: { justifyContent: 'center', alignItems: 'center', paddingRight: 20 },
-  heroEmoji: { fontSize: 36 },
+  cardSectionInner: { alignItems: 'center', paddingVertical: 18, paddingHorizontal: 8 },
+  cardSectionIcon: { fontSize: 28 },
+  cardSectionTitle: { fontSize: 15, fontWeight: '800', color: '#fff', marginTop: 6, letterSpacing: -0.3 },
+  cardSectionSub: { fontSize: 10, color: 'rgba(255,255,255,0.7)', marginTop: 2 },
+  cardSolo: { backgroundColor: Palette.purple },
+  cardCreate: { backgroundColor: Palette.teal },
+  cardJoin: { backgroundColor: Palette.coral },
 
   sectionHeader: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
@@ -343,6 +343,9 @@ const styles = StyleSheet.create({
   cardMeta: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 },
   cardDate: { fontSize: 12, color: Palette.textMuted },
   cardRoom: { fontSize: 10, fontWeight: '700', color: Palette.purple, backgroundColor: Palette.purple + '15', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4, overflow: 'hidden' },
+  starBtn: { paddingHorizontal: 8, paddingVertical: 10 },
+  starIcon: { fontSize: 20, color: Palette.textMuted },
+  starActive: { color: Palette.amber },
   cardArrow: { paddingRight: 14 },
   arrowText: { fontSize: 22, color: Palette.textMuted, fontWeight: '300' },
 

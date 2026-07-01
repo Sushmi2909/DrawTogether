@@ -4,6 +4,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Path, Line as SvgLine, Rect, Polygon, G, Text as SvgText } from 'react-native-svg';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as Sharing from 'expo-sharing';
+import { captureRef } from 'react-native-view-shot';
 import { api } from '@/lib/api';
 import { getToken } from '@/lib/auth';
 import { Radius, Shadow, PaletteType } from '@/constants/theme';
@@ -12,7 +15,7 @@ import { useTheme } from '@/lib/ThemeContext';
 type Point = { x: number; y: number };
 type BrushType = 'pen' | 'marker' | 'highlighter' | 'spray' | 'eraser'
   | 'calligraphy' | 'watercolor' | 'pencil' | 'charcoal' | 'airbrush'
-  | 'rectangle' | 'circle' | 'line' | 'arrow' | 'text' | 'eyedropper' | 'select' | 'fill';
+  | 'rectangle' | 'circle' | 'line' | 'arrow' | 'text' | 'eyedropper' | 'select';
 
 type WatercolorLayer = { points: Point[]; offset: Point; opacity: number };
 type CharcoalLayer = { points: Point[]; offset: Point; opacity: number };
@@ -60,7 +63,6 @@ const BRUSH_TYPES: { key: BrushType; label: string; icon: string }[] = [
   { key: 'text', label: 'Text', icon: '🔤' },
   { key: 'eyedropper', label: 'Pick', icon: '💉' },
   { key: 'select', label: 'Select', icon: '👆' },
-  { key: 'fill', label: 'Fill', icon: '🪣' },
 ];
 
 const screenW = Dimensions.get('window').width;
@@ -70,6 +72,21 @@ const WS_URL = (() => {
   try { if (typeof window !== 'undefined' && window.location) return `ws://${window.location.hostname}:8080`; } catch {}
   return 'ws://localhost:8080';
 })();
+
+function chaikin(pts: Point[], iterations = 1): Point[] {
+  let result = pts;
+  for (let iter = 0; iter < iterations; iter++) {
+    const next: Point[] = [result[0]];
+    for (let i = 0; i < result.length - 1; i++) {
+      const p0 = result[i], p1 = result[i + 1];
+      next.push({ x: 0.75 * p0.x + 0.25 * p1.x, y: 0.75 * p0.y + 0.25 * p1.y });
+      next.push({ x: 0.25 * p0.x + 0.75 * p1.x, y: 0.25 * p0.y + 0.75 * p1.y });
+    }
+    next.push(result[result.length - 1]);
+    result = next;
+  }
+  return result;
+}
 
 function toSvgPath(pts: Point[]) {
   if (pts.length < 2) return '';
@@ -88,18 +105,20 @@ function jitterPoints(pts: Point[], amount: number) {
 }
 
 function generateWatercolorData(pts: Point[], w: number): WatercolorLayer[] {
+  const smooth = chaikin(pts, 1);
   const count = Math.min(5, Math.max(3, Math.floor(w / 2)));
   return Array.from({ length: count }, () => ({
-    points: jitterPoints(pts, w * 0.3),
+    points: jitterPoints(smooth, w * 0.3),
     offset: { x: (Math.random() - 0.5) * w * 0.6, y: (Math.random() - 0.5) * w * 0.6 },
     opacity: 0.12 + Math.random() * 0.08,
   }));
 }
 
 function generateCharcoalData(pts: Point[], w: number): CharcoalLayer[] {
+  const smooth = chaikin(pts, 1);
   const count = Math.min(6, Math.max(3, Math.floor(w / 3)));
   return Array.from({ length: count }, () => ({
-    points: jitterPoints(pts, w * 0.5),
+    points: jitterPoints(smooth, w * 0.5),
     offset: { x: (Math.random() - 0.5) * w * 0.8, y: (Math.random() - 0.5) * w * 0.8 },
     opacity: 0.08 + Math.random() * 0.07,
   }));
@@ -107,43 +126,57 @@ function generateCharcoalData(pts: Point[], w: number): CharcoalLayer[] {
 
 function generateCalligraphyPath(pts: Point[], baseW: number): string {
   if (pts.length < 2) return '';
-  const widths = pts.map((p, i) => {
-    if (i === 0 || i === pts.length - 1) return baseW * 0.3;
-    return baseW * (0.2 + 0.8 * Math.abs(Math.sin(Math.atan2(p.y - pts[i - 1].y, p.x - pts[i - 1].x))));
-  });
+  const smooth = chaikin(pts, 2);
+  const nibAngle = -Math.PI / 4;
   const left: Point[] = [], right: Point[] = [];
-  for (let i = 0; i < pts.length; i++) {
-    const a = i === 0 ? Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x)
-      : i === pts.length - 1 ? Math.atan2(pts[i].y - pts[i - 1].y, pts[i].x - pts[i - 1].x)
-      : Math.atan2(pts[i + 1].y - pts[i - 1].y, pts[i + 1].x - pts[i - 1].x);
-    const p = a + Math.PI / 2, hw = widths[i] / 2;
-    left.push({ x: pts[i].x + Math.cos(p) * hw, y: pts[i].y + Math.sin(p) * hw });
-    right.push({ x: pts[i].x - Math.cos(p) * hw, y: pts[i].y - Math.sin(p) * hw });
+  for (let i = 0; i < smooth.length; i++) {
+    let tangent: number;
+    if (i === 0) tangent = Math.atan2(smooth[1].y - smooth[0].y, smooth[1].x - smooth[0].x);
+    else if (i === smooth.length - 1) tangent = Math.atan2(smooth[i].y - smooth[i - 1].y, smooth[i].x - smooth[i - 1].x);
+    else tangent = Math.atan2(smooth[i + 1].y - smooth[i - 1].y, smooth[i + 1].x - smooth[i - 1].x);
+    const diff = Math.abs(tangent - nibAngle) % Math.PI;
+    const nDiff = Math.min(diff, Math.PI - diff);
+    const wf = 0.3 + 0.7 * (nDiff / (Math.PI / 2));
+    const hw = (baseW * wf) / 2;
+    const perp = tangent + Math.PI / 2;
+    left.push({ x: smooth[i].x + Math.cos(perp) * hw, y: smooth[i].y + Math.sin(perp) * hw });
+    right.push({ x: smooth[i].x - Math.cos(perp) * hw, y: smooth[i].y - Math.sin(perp) * hw });
   }
   let d = `M ${left[0].x} ${left[0].y}`;
-  for (let i = 1; i < left.length; i++) d += ` L ${left[i].x} ${left[i].y}`;
-  for (let i = right.length - 1; i >= 0; i--) d += ` L ${right[i].x} ${right[i].y}`;
+  for (let i = 1; i < left.length; i++) {
+    const mx = (left[i - 1].x + left[i].x) / 2;
+    const my = (left[i - 1].y + left[i].y) / 2;
+    d += ` Q ${left[i - 1].x} ${left[i - 1].y} ${mx} ${my}`;
+  }
+  d += ` L ${right[right.length - 1].x} ${right[right.length - 1].y}`;
+  for (let i = right.length - 2; i >= 0; i--) {
+    const mx = (right[i + 1].x + right[i].x) / 2;
+    const my = (right[i + 1].y + right[i].y) / 2;
+    d += ` Q ${right[i + 1].x} ${right[i + 1].y} ${mx} ${my}`;
+  }
   return d + ' Z';
 }
 
 function generateSprayDots(pts: Point[], w: number) {
-  return Array.from({ length: pts.length * 8 }, () => {
-    const pi = Math.floor(Math.random() * pts.length);
+  const smooth = pts.length > 4 ? chaikin(pts, 1) : pts;
+  return Array.from({ length: smooth.length * 8 }, () => {
+    const pi = Math.floor(Math.random() * smooth.length);
     const a = Math.random() * Math.PI * 2;
     const d = Math.random() * w * 3;
-    const p = pts[pi];
+    const p = smooth[pi];
     return { x: p.x + Math.cos(a) * d, y: p.y + Math.sin(a) * d, r: Math.random() * 3 + 1, o: Math.random() * 0.6 + 0.2 };
   });
 }
 
 function generateAirbrushData(pts: Point[], w: number) {
+  const smooth = pts.length > 4 ? chaikin(pts, 1) : pts;
   const dots: { x: number; y: number; r: number; o: number }[] = [];
-  for (let i = 0; i < pts.length; i++) {
-    const count = Math.round(12 * (i === 0 ? 1 : Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y)));
+  for (let i = 0; i < smooth.length; i++) {
+    const count = Math.round(12 * (i === 0 ? 1 : Math.hypot(smooth[i].x - smooth[i - 1].x, smooth[i].y - smooth[i - 1].y)));
     for (let j = 0; j < Math.min(count, 40); j++) {
       const angle = Math.random() * Math.PI * 2;
       const dist = Math.abs(gaussRandom()) * w * 2.5;
-      dots.push({ x: pts[i].x + Math.cos(angle) * dist, y: pts[i].y + Math.sin(angle) * dist, r: Math.random() * 2.5 + 0.5, o: Math.random() * 0.15 + 0.05 });
+      dots.push({ x: smooth[i].x + Math.cos(angle) * dist, y: smooth[i].y + Math.sin(angle) * dist, r: Math.random() * 2.5 + 0.5, o: Math.random() * 0.15 + 0.05 });
     }
   }
   return dots;
@@ -220,72 +253,6 @@ function findNearestStroke(pt: Point, allStrokes: Stroke[]): Stroke | null {
   return idx !== null ? allStrokes[idx] : null;
 }
 
-async function doFloodFillWeb(pt: Point, allStrokes: Stroke[], w: number, h: number, fillColor: string): Promise<Stroke | null> {
-  if (typeof document === 'undefined') return null;
-  try {
-    const svgEl = document.getElementById('canvas-svg') as unknown as SVGSVGElement;
-    if (!svgEl) return null;
-    const clone = svgEl.cloneNode(true) as SVGSVGElement;
-    clone.setAttribute('width', String(w));
-    clone.setAttribute('height', String(h));
-    clone.setAttribute('viewBox', `0 0 ${w} ${h}`);
-    const svgData = new XMLSerializer().serializeToString(clone);
-    const blob = new Blob([svgData], { type: 'image/svg+xml' });
-    const url = URL.createObjectURL(blob);
-    const img = new window.Image();
-    img.width = w;
-    img.height = h;
-    return new Promise<Stroke | null>((resolve) => {
-      img.onload = () => {
-        URL.revokeObjectURL(url);
-        const c = document.createElement('canvas');
-        c.width = w;
-        c.height = h;
-        const ctx = c.getContext('2d')!;
-        ctx.drawImage(img, 0, 0, w, h);
-        const id = ctx.getImageData(0, 0, w, h);
-        const data = id.data;
-        const ix = Math.round(pt.x);
-        const iy = Math.round(pt.y);
-        const tgtIdx = (iy * w + ix) * 4;
-        const tgtR = data[tgtIdx], tgtG = data[tgtIdx + 1], tgtB = data[tgtIdx + 2];
-        if (Math.abs(tgtR - 255) < 5 && Math.abs(tgtG - 255) < 5 && Math.abs(tgtB - 255) < 5) { resolve(null); return; }
-        const visited = new Uint8Array(w * h);
-        const fillR = parseInt(fillColor.slice(1, 3), 16);
-        const fillG = parseInt(fillColor.slice(3, 5), 16);
-        const fillB = parseInt(fillColor.slice(5, 7), 16);
-        const stack: number[] = [ix + iy * w];
-        const boundary: Point[] = [];
-        while (stack.length) {
-          const idx2 = stack.pop()!;
-          if (visited[idx2]) continue;
-          visited[idx2] = 1;
-          const px = idx2 % w, py = Math.floor(idx2 / w);
-          const di = (py * w + px) * 4;
-          const dr = Math.abs(data[di] - tgtR), dg = Math.abs(data[di + 1] - tgtG), db = Math.abs(data[di + 2] - tgtB);
-          if (dr > 30 || dg > 30 || db > 30) { boundary.push({ x: px, y: py }); continue; }
-          if (px > 0 && !visited[idx2 - 1]) stack.push(idx2 - 1);
-          if (px < w - 1 && !visited[idx2 + 1]) stack.push(idx2 + 1);
-          if (py > 0 && !visited[idx2 - w]) stack.push(idx2 - w);
-          if (py < h - 1 && !visited[idx2 + w]) stack.push(idx2 + w);
-        }
-        if (boundary.length < 3) { resolve(null); return; }
-        const cx = boundary.reduce((a, b) => a + b.x, 0) / boundary.length;
-        const cy = boundary.reduce((a, b) => a + b.y, 0) / boundary.length;
-        boundary.sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
-        let fillPts = boundary;
-        if (fillPts.length > 500) {
-          const step = Math.ceil(fillPts.length / 500);
-          fillPts = fillPts.filter((_, i) => i % step === 0);
-        }
-        resolve({ points: fillPts, color: fillColor, width: 1, brush: 'pen' as BrushType, layer: 'default' });
-      };
-      img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
-      img.src = url;
-    }) as unknown as Stroke | null;
-  } catch { return null; }
-}
-
 function renderShapeStroke(s: Stroke, i: number) {
   const sc = s.color;
   const [p1, p2] = [s.points[0], s.points[s.points.length - 1]];
@@ -339,6 +306,7 @@ export default function CanvasScreen() {
   const [connected, setConnected] = useState(false);
   const [traceImage, setTraceImage] = useState<string | null>(null);
   const [traceOpacity, setTraceOpacity] = useState(0.3);
+  const [starred, setStarred] = useState(false);
   const [drawingId, setDrawingId] = useState<string | null>(id || null);
   const [title, setTitle] = useState('Untitled');
   const [room, setRoom] = useState(roomParam || (id ? '' : Math.random().toString(36).slice(2, 7).toUpperCase()));
@@ -357,18 +325,13 @@ export default function CanvasScreen() {
   const [replaySpeed, setReplaySpeed] = useState(1);
   const replayTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const replayIdxRef = useRef(0);
-  const [panning, setPanning] = useState(false);
-  const [scale, setScale] = useState(1);
-  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
-  const panStart = useRef({ x: 0, y: 0 });
-  const panOffsetStart = useRef({ x: 0, y: 0 });
-  const panOffsetRef = useRef({ x: 0, y: 0 });
-  const scaleRef = useRef(1);
-  const panningRef = useRef(false);
+
 
   const [layers, setLayers] = useState<{ id: string; name: string; visible: boolean }[]>([{ id: 'default', name: 'Layer 1', visible: true }]);
   const [activeLayer, setActiveLayer] = useState('default');
   const [showLayers, setShowLayers] = useState(false);
+  const [showGrid, setShowGrid] = useState(false);
+  const [hexColor, setHexColor] = useState('');
   const [showBrushMenu, setShowBrushMenu] = useState(false);
   const [showShapeMenu, setShowShapeMenu] = useState(false);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -381,9 +344,9 @@ export default function CanvasScreen() {
   const [shapePreview, setShapePreview] = useState<{ start: Point; end: Point } | null>(null);
   const dragOffset = useRef({ x: 0, y: 0 });
   const dragOrigPoints = useRef<Point[]>([]);
-  const fitDone = useRef(false);
   const sliderTrackWidth = useRef(100);
   const canvasRef = useRef<any>(null);
+  const exportRef = useRef<any>(null);
   const sliderPanResponder = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
@@ -464,29 +427,6 @@ export default function CanvasScreen() {
     return () => { if (wsRef.current) wsRef.current.close(); if (replayTimer.current) clearInterval(replayTimer.current); };
   }, [room, connectWs]);
 
-  useEffect(() => {
-    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
-    const el = document.getElementById('canvas-wrap');
-    if (!el) return;
-    const onWheel = (e: WheelEvent) => {
-      if (!e.ctrlKey && !e.metaKey) return;
-      e.preventDefault();
-      setScale((s) => Math.max(0.25, Math.min(4, s + -e.deltaY * 0.01)));
-    };
-    el.addEventListener('wheel', onWheel, { passive: false });
-    return () => el.removeEventListener('wheel', onWheel);
-  }, []);
-
-  useEffect(() => {
-    if (canvasSize.w > 0 && canvasSize.h > 0 && docSize.w > 0 && docSize.h > 0 && !fitDone.current) {
-      fitDone.current = true;
-      setPanOffset({ x: (canvasSize.w - docSize.w) / 2, y: (canvasSize.h - docSize.h) / 2 });
-    }
-  }, [canvasSize, docSize]);
-
-  panningRef.current = panning;
-  panOffsetRef.current = panOffset;
-  scaleRef.current = scale;
   const colorRef = useRef(color);
   const widthRef = useRef(width);
   const brushRef = useRef(brush);
@@ -504,6 +444,8 @@ export default function CanvasScreen() {
         if (drawing.strokes?.length) setStrokes(drawing.strokes);
         if (drawing.title) setTitle(drawing.title);
         if (drawing.docSize) setDocSize(drawing.docSize);
+        if (drawing.starred) setStarred(true);
+        if (drawing.imageLayer?.uri) { setTraceImage(drawing.imageLayer.uri); setTraceOpacity(drawing.imageLayer.opacity || 0.5); }
         setRoom(drawing.room || Math.random().toString(36).slice(2, 7).toUpperCase());
         setShowSizePicker(false);
       } catch {}
@@ -555,148 +497,150 @@ export default function CanvasScreen() {
     addStroke(stroke);
   }, [addStroke]);
 
+  const strokesRef = useRef(strokes);
+  const selectedIdRef = useRef(selectedId);
+  const activeLayerRef = useRef(activeLayer);
+  strokesRef.current = strokes;
+  selectedIdRef.current = selectedId;
+  activeLayerRef.current = activeLayer;
+
   const pointsRef = useRef<Point[]>([]);
-  const MIN_DIST = 3;
+  const lastMoveTime = useRef(0);
+  const MOVE_THROTTLE = 35;
+  const MIN_DIST = 1.5;
 
   const getPoint = (e: any): Point => {
-    const { x: ox, y: oy } = panOffsetRef.current;
-    const s = scaleRef.current;
-    if (Platform.OS === 'web') {
-      const el = canvasRef.current;
-      if (el && typeof el.getBoundingClientRect === 'function') {
-        const r = el.getBoundingClientRect();
-        const px = typeof e.nativeEvent.pageX === 'number' ? e.nativeEvent.pageX : e.nativeEvent.locationX;
-        const py = typeof e.nativeEvent.pageY === 'number' ? e.nativeEvent.pageY : e.nativeEvent.locationY;
-        const sx = window.scrollX || 0, sy = window.scrollY || 0;
-        return { x: ((px - sx) - r.left - ox) / s, y: ((py - sy) - r.top - oy) / s };
+    let tx: number, ty: number;
+    if (Platform.OS === 'web' && canvasRef.current) {
+      try {
+        const r = canvasRef.current.getBoundingClientRect();
+        const px = e.nativeEvent.pageX ?? e.nativeEvent.locationX ?? 0;
+        const py = e.nativeEvent.pageY ?? e.nativeEvent.locationY ?? 0;
+        tx = px - (window.scrollX || 0) - r.left;
+        ty = py - (window.scrollY || 0) - r.top;
+      } catch {
+        tx = e.nativeEvent.locationX ?? 0;
+        ty = e.nativeEvent.locationY ?? 0;
       }
+    } else {
+      tx = e.nativeEvent.locationX ?? 0;
+      ty = e.nativeEvent.locationY ?? 0;
     }
-    return { x: (e.nativeEvent.locationX - ox) / s, y: (e.nativeEvent.locationY - oy) / s };
+    if (typeof tx !== 'number' || !isFinite(tx)) tx = 0;
+    if (typeof ty !== 'number' || !isFinite(ty)) ty = 0;
+    return { x: tx, y: ty };
   };
 
-  const panResponder = useMemo(() =>
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: (e, gs) => {
-        if (panningRef.current) {
-          panStart.current = { x: gs.x0, y: gs.y0 };
-          panOffsetStart.current = { ...panOffsetRef.current };
-          return;
-        }
-        const pt = getPoint(e);
-        const b = brush;
+  const panResponder = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderGrant: (e) => {
+      const pt = getPoint(e);
+      const b = brushRef.current;
+      const allStrokes = strokesRef.current;
 
-        if (b === 'text') {
-          textPos.current = pt;
-          setTextModal(true);
-          return;
+      if (b === 'text') {
+        textPos.current = pt;
+        setTextModal(true);
+        return;
+      }
+      if (b === 'eyedropper') {
+        const nearest = findNearestStroke(pt, allStrokes);
+        if (nearest) setColor(nearest.color);
+        return;
+      }
+      if (b === 'select') {
+        const idx = findStrokeAt(pt, allStrokes);
+        setSelectedId(idx);
+        selectedIdRef.current = idx;
+        if (idx !== null) {
+          dragOffset.current = { x: pt.x - allStrokes[idx].points[0].x, y: pt.y - allStrokes[idx].points[0].y };
+          dragOrigPoints.current = allStrokes[idx].points.map(p => ({ ...p }));
         }
-        if (b === 'eyedropper') {
-          const nearest = findNearestStroke(pt, strokes);
-          if (nearest) setColor(nearest.color);
-          return;
-        }
-        if (b === 'fill') {
-          doFloodFill(pt);
-          return;
-        }
-        if (b === 'select') {
-          const idx = findStrokeAt(pt, strokes);
-          setSelectedId(idx);
-          if (idx !== null) {
-            dragOffset.current = { x: pt.x - strokes[idx].points[0].x, y: pt.y - strokes[idx].points[0].y };
-            dragOrigPoints.current = strokes[idx].points.map(p => ({ ...p }));
-          }
-          return;
-        }
-        if (['rectangle', 'circle', 'line', 'arrow'].includes(b)) {
-          shapeStart.current = pt;
-          shapeEndRef.current = pt;
-          setShapePreview({ start: pt, end: pt });
-          return;
-        }
-        pointsRef.current = [pt];
-        setCurrentPoints([pt]);
-      },
-      onPanResponderMove: (e, gs) => {
-        if (panningRef.current) {
-          setPanOffset({ x: panOffsetStart.current.x + gs.dx, y: panOffsetStart.current.y + gs.dy });
-          return;
-        }
-        const pt = getPoint(e);
-        const b = brush;
+        return;
+      }
+      if (['rectangle', 'circle', 'line', 'arrow'].includes(b)) {
+        shapeStart.current = pt;
+        shapeEndRef.current = pt;
+        setShapePreview({ start: pt, end: pt });
+        return;
+      }
+      pointsRef.current = [pt];
+      setCurrentPoints([pt]);
+    },
+    onPanResponderMove: (e) => {
+      const pt = getPoint(e);
+      const b = brushRef.current;
+      const sid = selectedIdRef.current;
+      const allStrokes = strokesRef.current;
+      const cs = canvasSizeRef.current;
 
-        if (['rectangle', 'circle', 'line', 'arrow'].includes(b)) {
-          const ep = { x: Math.max(0, Math.min(canvasSize.w, pt.x)), y: Math.max(0, Math.min(canvasSize.h, pt.y)) };
-          shapeEndRef.current = ep;
-          setShapePreview({ start: shapeStart.current!, end: ep });
-          setCurrentPoints([shapeStart.current!, ep]);
-          return;
-        }
-        if (b === 'select' && selectedId !== null) {
-          const dx = pt.x - strokes[selectedId].points[0].x - dragOffset.current.x;
-          const dy = pt.y - strokes[selectedId].points[0].y - dragOffset.current.y;
-          const moved = dragOrigPoints.current.map(p => ({ x: p.x + dx, y: p.y + dy }));
-          setStrokes((prev) => {
-            const copy = [...prev];
-            copy[selectedId] = { ...copy[selectedId], points: moved };
-            return copy;
-          });
-          return;
-        }
-        const prev = pointsRef.current[pointsRef.current.length - 1];
-        if (prev && Math.hypot(pt.x - prev.x, pt.y - prev.y) < MIN_DIST) return;
-        pointsRef.current.push(pt);
+      if (['rectangle', 'circle', 'line', 'arrow'].includes(b)) {
+        const ep = { x: Math.max(0, Math.min(cs.w, pt.x)), y: Math.max(0, Math.min(cs.h, pt.y)) };
+        shapeEndRef.current = ep;
+        setShapePreview({ start: shapeStart.current!, end: ep });
+        setCurrentPoints([shapeStart.current!, ep]);
+        return;
+      }
+      if (b === 'select' && sid !== null && allStrokes[sid]) {
+        const dx = pt.x - allStrokes[sid].points[0].x - dragOffset.current.x;
+        const dy = pt.y - allStrokes[sid].points[0].y - dragOffset.current.y;
+        const moved = dragOrigPoints.current.map(p => ({ x: p.x + dx, y: p.y + dy }));
+        setStrokes((prev) => {
+          const copy = [...prev];
+          if (copy[sid]) copy[sid] = { ...copy[sid], points: moved };
+          return copy;
+        });
+        return;
+      }
+      const prev = pointsRef.current[pointsRef.current.length - 1];
+      if (prev && Math.hypot(pt.x - prev.x, pt.y - prev.y) < MIN_DIST) return;
+      pointsRef.current.push(pt);
+      const now = Date.now();
+      if (now - lastMoveTime.current >= MOVE_THROTTLE) {
+        lastMoveTime.current = now;
         setCurrentPoints([...pointsRef.current]);
-      },
-      onPanResponderRelease: () => {
-        if (panningRef.current) return;
-        const b = brush;
-        if (['rectangle', 'circle', 'line', 'arrow'].includes(b) && shapeStart.current && shapeEndRef.current) {
-          const start = shapeStart.current;
-          const end = shapeEndRef.current;
-          if (Math.hypot(end.x - start.x, end.y - start.y) > 3) {
-            const sp = brushRef.current === 'arrow' ? end : start;
-            const ep = brushRef.current === 'arrow' ? end : start;
-            const stroke: Stroke = {
-              points: [start, end],
-              color: colorRef.current,
-              width: widthRef.current,
-              brush: brushRef.current,
-              layer: activeLayer,
-              shapeType: b as 'rect' | 'circle' | 'line' | 'arrow',
-            };
-            addStroke(stroke);
-          }
-          shapeStart.current = null;
-          shapeEndRef.current = null;
-          setShapePreview(null);
-          setCurrentPoints([]);
-          return;
-        }
-        if (b === 'select') {
-          dragOrigPoints.current = [];
-          return;
-        }
-        const pts = pointsRef.current;
-        pointsRef.current = [];
-        if (pts.length < 2) return;
-        finishStroke(pts);
-        setCurrentPoints([]);
-      },
-    }), [finishStroke, strokes, brush, selectedId, activeLayer, docSize]);
+      }
+    },
+    onPanResponderRelease: () => {
+      const b = brushRef.current;
 
-  const doFloodFill = async (pt: Point) => {
-    if (Platform.OS !== 'web') { Alert.alert('Fill', 'Only available on web'); return; }
-    const result = doFloodFillWeb(pt, strokes, docSize.w, docSize.h, color);
-    if (result instanceof Promise) {
-      const stroke = await result;
-      if (stroke) addStroke(stroke);
-    } else if (result) {
-      addStroke(result);
-    }
-  };
+      if (['rectangle', 'circle', 'line', 'arrow'].includes(b) && shapeStart.current && shapeEndRef.current) {
+        const start = shapeStart.current;
+        const end = shapeEndRef.current;
+        if (Math.hypot(end.x - start.x, end.y - start.y) > 3) {
+          const st = b === 'rectangle' ? 'rect' : b;
+          const stroke: Stroke = {
+            points: [start, end],
+            color: colorRef.current,
+            width: widthRef.current,
+            brush: brushRef.current,
+            layer: activeLayerRef.current,
+            shapeType: st as 'rect' | 'circle' | 'line' | 'arrow',
+          };
+          addStroke(stroke);
+        }
+        shapeStart.current = null;
+        shapeEndRef.current = null;
+        setShapePreview(null);
+        setCurrentPoints([]);
+        return;
+      }
+      if (b === 'select') {
+        dragOrigPoints.current = [];
+        setCurrentPoints([]);
+        return;
+      }
+      const pts = pointsRef.current;
+      // Flush remaining points on release
+      lastMoveTime.current = 0;
+      setCurrentPoints([...pts]);
+      pointsRef.current = [];
+      if (pts.length < 2) { setCurrentPoints([]); return; }
+      finishStroke(pts);
+      setCurrentPoints([]);
+    },
+  })).current;
 
   const pickImage = async () => {
     try {
@@ -713,53 +657,96 @@ export default function CanvasScreen() {
     setRedoStack([]);
   };
 
-  const captureThumbnail = useCallback((): string | null => {
-    if (Platform.OS !== 'web' || typeof document === 'undefined') return null;
+  const captureThumbnail = useCallback(async (): Promise<string | null> => {
+    if (Platform.OS === 'web' && typeof document !== 'undefined') {
+      try {
+        const svgEl = document.getElementById('canvas-svg');
+        if (!svgEl) return null;
+        const svgData = new XMLSerializer().serializeToString(svgEl);
+        return 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
+      } catch { return null; }
+    }
     try {
-      const svgEl = document.getElementById('canvas-svg');
-      if (!svgEl) return null;
-      const svgData = new XMLSerializer().serializeToString(svgEl);
-      return 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
+      return await new Promise<string | null>((resolve) => {
+        setExportCapture(true);
+        setTimeout(async () => {
+          try {
+            if (!exportRef.current) { resolve(null); return; }
+            const uri = await captureRef(exportRef, { format: 'png', quality: 0.5 });
+            const base64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+            resolve('data:image/png;base64,' + base64);
+          } catch { resolve(null); } finally { setExportCapture(false); }
+        }, 500);
+      });
     } catch { return null; }
   }, []);
 
   const [showExport, setShowExport] = useState(false);
+  const [exportCapture, setExportCapture] = useState(false);
 
-  const doExport = (fmt: 'png' | 'jpeg') => {
+  const doExport = async (fmt: 'png' | 'jpeg') => {
     setShowExport(false);
-    if (Platform.OS !== 'web' || typeof document === 'undefined') { Alert.alert('Export', 'Only supported on web'); return; }
+    const name = title || 'drawing';
     try {
-      const s = new XMLSerializer();
-      const svgEl = document.querySelector('svg[id="canvas-svg"]') || document.getElementById('canvas-svg');
-      if (!svgEl) { Alert.alert('SVG element not found'); return; }
-      const clone = svgEl.cloneNode(true) as SVGSVGElement;
-      clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-      const rect = svgEl.getBoundingClientRect();
-      const w = Math.round(rect.width) || 800;
-      const h = Math.round(rect.height) || 600;
-      clone.setAttribute('width', String(w));
-      clone.setAttribute('height', String(h));
-      clone.setAttribute('viewBox', `0 0 ${w} ${h}`);
-      const svgString = s.serializeToString(clone);
-      const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-
-      const img = new window.Image();
-      img.onload = () => {
-        URL.revokeObjectURL(url);
-        const c = document.createElement('canvas');
-        c.width = w;
-        c.height = h;
-        const ctx = c.getContext('2d')!;
-        if (fmt === 'jpeg') { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); }
-        ctx.drawImage(img, 0, 0, w, h);
-        const a = document.createElement('a');
-        a.href = c.toDataURL(fmt === 'jpeg' ? 'image/jpeg' : 'image/png', 0.92);
-        a.download = `${title || 'drawing'}.${fmt}`;
-        a.click();
-      };
-      img.onerror = () => { URL.revokeObjectURL(url); Alert.alert('Export failed', 'Could not render the image'); };
-      img.src = url;
+      if (Platform.OS === 'web' && typeof document !== 'undefined') {
+        const ext = fmt === 'jpeg' ? 'jpg' : 'png';
+        const s = new XMLSerializer();
+        const svgEl = document.querySelector('svg[id="canvas-svg"]') || document.getElementById('canvas-svg');
+        if (!svgEl) { Alert.alert('SVG element not found'); return; }
+        const clone = svgEl.cloneNode(true) as SVGSVGElement;
+        clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        const rect = svgEl.getBoundingClientRect();
+        const w = Math.round(rect.width) || docSize.w;
+        const h = Math.round(rect.height) || docSize.h;
+        clone.setAttribute('width', String(w));
+        clone.setAttribute('height', String(h));
+        clone.setAttribute('viewBox', `0 0 ${w} ${h}`);
+        const svgString = s.serializeToString(clone);
+        const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const img = new window.Image();
+        img.onload = () => {
+          URL.revokeObjectURL(url);
+          const c = document.createElement('canvas');
+          c.width = w; c.height = h;
+          const ctx = c.getContext('2d')!;
+          if (fmt === 'jpeg') { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); }
+          ctx.drawImage(img, 0, 0, w, h);
+          const a = document.createElement('a');
+          a.href = c.toDataURL(fmt === 'jpeg' ? 'image/jpeg' : 'image/png', 0.92);
+          a.download = `${name}.${ext}`;
+          a.click();
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); Alert.alert('Export failed', 'Could not render the image'); };
+        img.src = url;
+      } else {
+        const ext = fmt === 'jpeg' ? 'jpg' : 'png';
+        const uri = await new Promise<string | null>((resolve) => {
+          setExportCapture(true);
+          setTimeout(async () => {
+            try {
+              const r = await captureRef(exportRef, { format: 'png', quality: 0.92 });
+              resolve(r);
+            } catch { resolve(null); }
+          }, 500);
+        });
+        setExportCapture(false);
+        if (!uri) { Alert.alert('Export failed'); return; }
+        const outPath = FileSystem.cacheDirectory + `${name}.${ext}`;
+        if (fmt === 'jpeg') {
+          const tmpPath = FileSystem.cacheDirectory + `${name}.png`;
+          await FileSystem.moveAsync({ from: uri, to: tmpPath });
+          const resized = await FileSystem.readAsStringAsync(tmpPath, { encoding: FileSystem.EncodingType.Base64 });
+          await FileSystem.writeAsStringAsync(outPath, resized, { encoding: FileSystem.EncodingType.Base64 });
+        } else {
+          await FileSystem.moveAsync({ from: uri, to: outPath });
+        }
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(outPath, { mimeType: fmt === 'jpeg' ? 'image/jpeg' : 'image/png', dialogTitle: `Save ${name}.${ext}` });
+        } else {
+          Alert.alert('Exported', `Saved to ${outPath}`);
+        }
+      }
     } catch (e: any) { Alert.alert('Export error', e?.message || 'Unknown error'); }
   };
 
@@ -768,12 +755,12 @@ export default function CanvasScreen() {
     try {
       const token = await getToken();
       if (!token) return router.replace('/login');
-      const thumbnail = captureThumbnail();
-      const result = await api.saveDrawing(token, { title, strokes, thumbnail, room, docSize }, drawingId || undefined);
+      const thumbnail = await captureThumbnail();
+      const result = await api.saveDrawing(token, { title, strokes, thumbnail, room, docSize, starred, imageLayer: traceImage ? { uri: traceImage, opacity: traceOpacity } : null }, drawingId || undefined);
       if (!drawingId) setDrawingId(result.id);
     } catch (e: any) { Alert.alert('Save failed', e.message); }
-    finally { setSaving(false); }
-  }, [strokes, drawingId, title, captureThumbnail, room]);
+    finally { setSaving(false); setExportCapture(false); }
+  }, [strokes, drawingId, title, captureThumbnail, room, starred, traceImage, traceOpacity]);
 
   const saveRef = useRef(save);
   const undoRef = useRef(undo);
@@ -873,6 +860,11 @@ export default function CanvasScreen() {
         default: return null;
       }
     }
+    if (currentPoints.length === 1) {
+      const dotC = brush === 'eraser' ? '#FFFFFF' : color;
+      const dotR = Math.max(2, width * (brush === 'highlighter' || brush === 'eraser' ? 3 : brush === 'marker' ? 1.5 : 1) / 2);
+      return <Circle cx={currentPoints[0].x} cy={currentPoints[0].y} r={dotR} fill={dotC} opacity={brush === 'highlighter' ? 0.3 : brush === 'marker' ? 0.5 : 1} />;
+    }
     if (currentPoints.length < 2) return null;
     const b = brush, c = b === 'eraser' ? '#FFFFFF' : color, w = width;
     switch (b) {
@@ -914,10 +906,6 @@ export default function CanvasScreen() {
             </Pressable>
             <Pressable onPress={() => setShowExport(true)} style={styles.hBtnSm}><Text style={styles.hIconSm}>⬇</Text></Pressable>
             <Pressable onPress={toggleReplay} style={styles.hBtnSm}><Text style={[styles.hIconSm, strokes.length === 0 && styles.hDisabled]}>{replaying ? '⏹' : '▶'}</Text></Pressable>
-            <Pressable onPress={() => { setPanning((p) => !p); }} style={[styles.hBtnSm, panning && { backgroundColor: P.purple + '30', borderRadius: 6 }]}><Text style={styles.hIconSm}>✋</Text></Pressable>
-            <Pressable onPress={() => { setScale((s) => Math.min(4, s + 0.25)); }} style={styles.hBtnSm}><Text style={[styles.hIconSm, { fontSize: 11 }]}>🔍+</Text></Pressable>
-            <Pressable onPress={() => { setScale((s) => Math.max(0.25, s - 0.25)); }} style={styles.hBtnSm}><Text style={[styles.hIconSm, { fontSize: 11 }]}>🔍−</Text></Pressable>
-            {scale !== 1 && <Pressable onPress={() => { setScale(1); setPanOffset({ x: 0, y: 0 }); }} style={styles.hBtnSm}><Text style={[styles.hIconSm, { fontSize: 9, color: P.textMuted }]}>RST</Text></Pressable>}
             <Pressable onPress={undo} style={styles.hBtnSm}><Text style={[styles.hIconSm, history.length === 0 && styles.hDisabled]}>↩</Text></Pressable>
             <Pressable onPress={redo} style={styles.hBtnSm}><Text style={[styles.hIconSm, redoStack.length === 0 && styles.hDisabled]}>↪</Text></Pressable>
             <Pressable onPress={pickImage} style={styles.hBtnSm}><Text style={styles.hIconSm}>🖼</Text></Pressable>
@@ -925,6 +913,7 @@ export default function CanvasScreen() {
             <Pressable onPress={clearAll} style={styles.hBtnSm}><Text style={[styles.hIconSm, { color: '#EF4444' }]}>🗑</Text></Pressable>
             <Pressable onPress={() => { setChatOpen(!chatOpen); Animated.timing(chatAnim, { toValue: chatOpen ? 0 : 1, duration: 250, useNativeDriver: false }).start(); }} style={[styles.hBtnSm, chatOpen && { backgroundColor: P.purple + '30', borderRadius: 6 }]}><Text style={styles.hIconSm}>💬</Text></Pressable>
             <Pressable onPress={() => setShowLayers(true)} style={styles.hBtnSm}><Text style={styles.hIconSm}>📑</Text></Pressable>
+            <Pressable onPress={() => setShowGrid((p) => !p)} style={[styles.hBtnSm, showGrid && { backgroundColor: P.purple + '30', borderRadius: 6 }]}><Text style={styles.hIconSm}>⊞</Text></Pressable>
             <Pressable onPress={toggleDark} style={styles.hBtnSm}><Text style={styles.hIconSm}>{isDark ? '☀️' : '🌙'}</Text></Pressable>
           </ScrollView>
         </View>
@@ -956,15 +945,21 @@ export default function CanvasScreen() {
 
         <View style={styles.canvasWrap} id="canvas-wrap" onLayout={(e) => setCanvasSize({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height })}>
           <View ref={canvasRef} style={styles.canvas} {...panResponder.panHandlers}>
-            <View style={[StyleSheet.absoluteFill, { transform: [{ translateX: panOffset.x }, { translateY: panOffset.y }, { scale }] }]}>
+            <View style={StyleSheet.absoluteFill}>
             {traceImage && (
-              <View style={StyleSheet.absoluteFill} pointerEvents="none">
+              <View style={[StyleSheet.absoluteFill, { pointerEvents: 'none' }]}>
                 <Image source={{ uri: traceImage }} style={{ width: docSize.w, height: docSize.h, opacity: traceOpacity }} resizeMode="contain" />
               </View>
             )}
-            <Svg ref={svgRef} width={docSize.w} height={docSize.h} viewBox={`0 0 ${docSize.w} ${docSize.h}`} id="canvas-svg">
+            <Svg id="canvas-svg" width={docSize.w} height={docSize.h} viewBox={`0 0 ${docSize.w} ${docSize.h}`} style={{ pointerEvents: 'none' }}>
+              {showGrid && (() => {
+                const gs = 20;
+                const lines = [];
+                for (let x = gs; x < docSize.w; x += gs) lines.push(<SvgLine key={`gv${x}`} x1={x} y1={0} x2={x} y2={docSize.h} stroke="#E0E0E0" strokeWidth={x % 100 === 0 ? 0.8 : 0.3} />);
+                for (let y = gs; y < docSize.h; y += gs) lines.push(<SvgLine key={`gh${y}`} x1={0} y1={y} x2={docSize.w} y2={y} stroke="#E0E0E0" strokeWidth={y % 100 === 0 ? 0.8 : 0.3} />);
+                return lines;
+              })()}
               {completedSvg}
-              {renderCurrent()}
               {selectedId !== null && strokes[selectedId] && (() => {
                 const b = getStrokeBounds(strokes[selectedId]);
                 return (
@@ -980,13 +975,24 @@ export default function CanvasScreen() {
                 );
               })()}
             </Svg>
+            <Svg width={docSize.w} height={docSize.h} viewBox={`0 0 ${docSize.w} ${docSize.h}`}>
+              {renderCurrent()}
+            </Svg>
             </View>
           </View>
         </View>
 
+        {exportCapture && (
+          <View ref={exportRef} style={{ position: 'absolute', left: -9999, top: -9999, width: docSize.w, height: docSize.h, backgroundColor: '#fff' } as any}>
+            <Svg width={docSize.w} height={docSize.h} viewBox={`0 0 ${docSize.w} ${docSize.h}`}>
+              {completedSvg}
+            </Svg>
+          </View>
+        )}
+
         <View style={styles.toolbar}>
           <View style={styles.toolModeRow}>
-            <Pressable style={[styles.toolModeBtn, styles.toolModeBrush, !['rectangle','circle','line','arrow','text','eyedropper','select','fill','eraser'].includes(brush) && styles.toolModeActive]} onPress={() => setShowBrushMenu(true)}>
+            <Pressable style={[styles.toolModeBtn, styles.toolModeBrush, !['rectangle','circle','line','arrow','text','eyedropper','select','eraser'].includes(brush) && styles.toolModeActive]} onPress={() => setShowBrushMenu(true)}>
               <Text style={styles.toolModeLabel}>Brush</Text>
               <Text style={styles.toolModeArrow}>▼</Text>
             </Pressable>
@@ -1000,7 +1006,6 @@ export default function CanvasScreen() {
                 { key: 'text', icon: '🔤' },
                 { key: 'eyedropper', icon: '💉' },
                 { key: 'select', icon: '👆' },
-                { key: 'fill', icon: '🪣' },
               ].map((t) => (
                 <Pressable key={t.key} style={[styles.toolMiniBtn, brush === t.key && styles.toolMiniActive]} onPress={() => setBrush(t.key as BrushType)}>
                   <Text style={styles.toolMiniIcon}>{t.icon}</Text>
@@ -1021,6 +1026,17 @@ export default function CanvasScreen() {
                 <Pressable key={i} style={[styles.hueSeg, { backgroundColor: hc }]} onPress={() => setColor(hc)} />
               ))}
             </ScrollView>
+            <TextInput
+              style={styles.hexInput}
+              value={hexColor}
+              onChangeText={setHexColor}
+              placeholder="#"
+              placeholderTextColor={P.textMuted}
+              maxLength={7}
+              autoCapitalize="none"
+              onSubmitEditing={() => { if (/^#[0-9a-f]{6}$/i.test(hexColor)) setColor(hexColor); }}
+              onBlur={() => { if (/^#[0-9a-f]{6}$/i.test(hexColor)) setColor(hexColor); }}
+            />
             <View style={styles.widthRow}>
               <Text style={styles.widthLabel}>{width}px</Text>
               <View style={styles.sliderTrack}
@@ -1159,7 +1175,7 @@ export default function CanvasScreen() {
                 <TextInput style={styles.sizeInput} value={String(docSize.h)} onChangeText={(t) => { const v = parseInt(t) || 400; setDocSize((s) => ({ ...s, h: Math.max(200, Math.min(4000, v)) })); }} keyboardType="number-pad" selectTextOnFocus />
                 <Text style={styles.sizeInputPx}>px</Text>
               </View>
-              <Pressable style={styles.modalBtn} onPress={() => { fitDone.current = false; setShowSizePicker(false); }}>
+              <Pressable style={styles.modalBtn} onPress={() => { setShowSizePicker(false); }}>
                 <Text style={styles.modalBtnLabel}>Start Drawing</Text>
               </Pressable>
               {drawingId && (
@@ -1315,6 +1331,7 @@ function makeStyles(P: PaletteType) { return StyleSheet.create({
   bottomRow: { paddingHorizontal: 8, paddingTop: 3, gap: 4 },
   hueContent: { gap: 0, alignItems: 'center' },
   hueSeg: { width: screenW / 60 - 0.3, height: 10 },
+  hexInput: { backgroundColor: P.offWhite, borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, fontSize: 12, fontWeight: '700', color: P.textPrimary, width: 60, borderWidth: 1, borderColor: P.border, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', textAlign: 'center' },
 
   chatPanel: { backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: P.border, overflow: 'hidden' },
   chatHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: P.border },

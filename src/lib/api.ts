@@ -48,7 +48,7 @@ export const api = {
   getDrawing: (token: string, id: string) =>
     request(`/api/drawings/${id}`, { headers: authHeaders(token) }),
 
-  saveDrawing: (token: string, data: { title?: string; strokes: any[]; thumbnail?: string | null; room?: string; docSize?: { w: number; h: number } }, id?: string) => {
+  saveDrawing: (token: string, data: { title?: string; strokes?: any[]; thumbnail?: string | null; room?: string; docSize?: { w: number; h: number }; starred?: boolean; imageLayer?: any }, id?: string) => {
     if (id) {
       return request(`/api/drawings/${id}`, { method: 'PUT', headers: authHeaders(token), body: JSON.stringify(data) });
     }
